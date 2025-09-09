@@ -143,7 +143,6 @@ EOF
     else
         echo -e "${GREEN}✅ Archivo .env ya existe${NC}"
         
-        # Verificar y agregar ORACLE_PWD si no existe
         if ! grep -q "ORACLE_PWD=" "$ENV_FILE"; then
             echo -e "${YELLOW}⚠️  ORACLE_PWD no está definido en .env${NC}"
             ORACLE_PWD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-25)
@@ -152,7 +151,6 @@ EOF
             echo -e "${CYAN}Contraseña Oracle: $ORACLE_PWD${NC}"
         fi
         
-        # Verificar y agregar LOCAL_USER si no existe
         if ! grep -q "LOCAL_USER=" "$ENV_FILE"; then
             echo -e "${YELLOW}⚠️  LOCAL_USER no está definido en .env${NC}"
             LOCAL_USER="oracleuser"
@@ -160,7 +158,6 @@ EOF
             echo -e "${GREEN}✅ LOCAL_USER agregado al archivo .env${NC}"
         fi
         
-        # Verificar y agregar LOCAL_PWD si no existe
         if ! grep -q "LOCAL_PWD=" "$ENV_FILE"; then
             echo -e "${YELLOW}⚠️  LOCAL_PWD no está definido en .env${NC}"
             LOCAL_PWD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-25)
@@ -256,11 +253,9 @@ verify_oracle_container() {
     done
 }
 
-# Función para crear usuario local de Oracle
 create_local_user() {
     echo -e "${BLUE}👤 Creando usuario local de Oracle...${NC}"
     
-    # Obtener credenciales del archivo .env
     local oracle_pwd=$(grep ORACLE_PWD .env | cut -d'=' -f2)
     local local_user=$(grep LOCAL_USER .env | cut -d'=' -f2)
     local local_pwd=$(grep LOCAL_PWD .env | cut -d'=' -f2)
@@ -270,20 +265,17 @@ create_local_user() {
         return 1
     fi
     
-    # Convertir nombre de usuario a minúsculas (Oracle requirement)
     local_user=$(echo "$local_user" | tr '[:upper:]' '[:lower:]')
     
     echo "Usuario: $local_user"
     echo -e "${YELLOW}Esperando a que la base de datos esté completamente lista...${NC}"
     
-    # Esperar a que la base de datos esté completamente lista
     local max_attempts=30
     local attempt=1
     
     while [[ $attempt -le $max_attempts ]]; do
         echo -n "Intento $attempt/$max_attempts: "
         
-        # Verificar si podemos conectarnos y ejecutar una consulta simple
         if docker exec oracle-db sqlplus -s system/$oracle_pwd@//localhost:1521/ORCLCDB <<< "SELECT 1 FROM DUAL;" >/dev/null 2>&1; then
             echo -e "${GREEN}✅ Base de datos lista${NC}"
             break
@@ -301,7 +293,6 @@ create_local_user() {
     
     echo "Verificando si el usuario ya existe..."
     
-    # Crear script SQL para verificar y crear usuario
     local sql_script="/tmp/create_user_$$.sql"
     
     cat > "$sql_script" << EOF
@@ -345,24 +336,20 @@ FROM dba_users WHERE username = UPPER('$local_user');
 EXIT;
 EOF
 
-    # Ejecutar el script SQL
     echo -e "${YELLOW}Ejecutando script SQL para crear usuario...${NC}"
     
     if docker exec -i oracle-db sqlplus -s system/$oracle_pwd@//localhost:1521/ORCLCDB < "$sql_script" > /tmp/oracle_user_creation_$$.log 2>&1; then
-        # Verificar si el usuario fue creado exitosamente
         if grep -q "SUCCESS: Usuario $local_user creado exitosamente" /tmp/oracle_user_creation_$$.log; then
             echo -e "${GREEN}✅ Usuario $local_user creado exitosamente${NC}"
         elif grep -q "INFO: Usuario $local_user ya existe" /tmp/oracle_user_creation_$$.log; then
             echo -e "${GREEN}✅ Usuario $local_user ya existe${NC}"
         elif grep -q "USER_INFO:" /tmp/oracle_user_creation_$$.log; then
             echo -e "${GREEN}✅ Usuario $local_user existe y está activo${NC}"
-            # Mostrar información del usuario
             grep "USER_INFO:" /tmp/oracle_user_creation_$$.log | sed 's/USER_INFO: //'
         else
             echo -e "${YELLOW}⚠️  No se pudo determinar el estado del usuario${NC}"
             echo -e "${YELLOW}Verificando manualmente...${NC}"
             
-            # Verificación manual
             local verify_script="/tmp/verify_user_$$.sql"
             cat > "$verify_script" << EOF
 SET PAGESIZE 0;
@@ -395,7 +382,6 @@ EOF
         return 1
     fi
     
-    # Limpiar archivos temporales
     rm -f "$sql_script" /tmp/oracle_user_creation_$$.log
     
     echo -e "${GREEN}✅ Usuario local configurado correctamente${NC}"
@@ -704,7 +690,6 @@ main() {
     verify_oracle_container
     echo ""
     
-    # Paso 8: Crear usuario local
     create_local_user
     echo ""
     
