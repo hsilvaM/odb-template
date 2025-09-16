@@ -259,6 +259,32 @@ docker exec oracle-db sqlplus -s system/$ORACLE_PWD@//localhost:1521/ORCLCDB <<<
 docker exec oracle-db sqlplus -s system/$ORACLE_PWD@//localhost:1521/ORCLCDB <<< "SELECT name, open_mode FROM v\$pdbs WHERE name = 'ORCLPDB1';"
 ```
 
+### Error ORA-01017 "logon denied"
+
+Este error indica problemas de autenticación. Las causas más comunes son:
+
+**Causas:**
+- Contraseña contiene caracteres especiales problemáticos
+- Contraseña muy corta (menos de 8 caracteres)
+- El contenedor no está completamente inicializado
+- Problemas de sincronización entre el contenedor y la base de datos
+
+**Soluciones:**
+```bash
+# 1. Regenerar contraseñas (recomendado)
+rm .env
+./setup-oracle.sh
+
+# 2. Reiniciar el contenedor
+docker-compose restart
+
+# 3. Verificar estado completo
+./diagnose-oracle.sh
+
+# 4. Verificar logs del contenedor
+docker logs oracle-db
+```
+
 ### Script de Diagnóstico
 
 Para diagnosticar problemas de conectividad, usa el script incluido:
@@ -275,6 +301,7 @@ Este script verifica:
 - ✅ Estado del PDB
 - ✅ Existencia del usuario local
 - ✅ Logs recientes
+- ✅ **Diagnóstico específico de ORA-01017**
 
 **Mejoras implementadas:**
 - ✅ **Verificación del Listener**: El script ahora verifica que el listener esté activo y con servicios registrados
@@ -284,6 +311,9 @@ Este script verifica:
 - ✅ **Mensajes Informativos**: Proporciona feedback detallado sobre el estado de cada componente
 - ✅ **Sugerencias de Solución**: Incluye comandos específicos para diagnosticar problemas
 - ✅ **Prevención de Errores**: Evita errores de "logon denied" verificando el estado antes de crear usuarios
+- ✅ **Diagnóstico ORA-01017**: Detecta y diagnostica errores de autenticación específicamente
+- ✅ **Contraseñas Seguras**: Genera contraseñas sin caracteres especiales problemáticos
+- ✅ **Múltiples Formatos de Conexión**: Prueba diferentes métodos de conexión para resolver problemas
 
 ## 📝 Notas Importantes
 

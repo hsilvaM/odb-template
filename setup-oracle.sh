@@ -126,9 +126,9 @@ setup_environment() {
     if [[ ! -f "$ENV_FILE" ]]; then
         echo -e "${YELLOW}Archivo .env no encontrado, creándolo...${NC}"
         
-        ORACLE_PWD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-25)
+        ORACLE_PWD=$(openssl rand -base64 32 | tr -d "=+/\"'\\" | cut -c1-25)
         LOCAL_USER="oracleuser"
-        LOCAL_PWD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-25)
+        LOCAL_PWD=$(openssl rand -base64 32 | tr -d "=+/\"'\\" | cut -c1-25)
         
         cat > "$ENV_FILE" << EOF
 ORACLE_PWD=$ORACLE_PWD
@@ -145,7 +145,7 @@ EOF
         
         if ! grep -q "ORACLE_PWD=" "$ENV_FILE"; then
             echo -e "${YELLOW}⚠️  ORACLE_PWD no está definido en .env${NC}"
-            ORACLE_PWD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-25)
+            ORACLE_PWD=$(openssl rand -base64 32 | tr -d "=+/\"'\\" | cut -c1-25)
             echo "ORACLE_PWD=$ORACLE_PWD" >> "$ENV_FILE"
             echo -e "${GREEN}✅ ORACLE_PWD agregado al archivo .env${NC}"
             echo -e "${CYAN}Contraseña Oracle: $ORACLE_PWD${NC}"
@@ -160,7 +160,7 @@ EOF
         
         if ! grep -q "LOCAL_PWD=" "$ENV_FILE"; then
             echo -e "${YELLOW}⚠️  LOCAL_PWD no está definido en .env${NC}"
-            LOCAL_PWD=$(openssl rand -base64 32 | tr -d "=+/" | cut -c1-25)
+            LOCAL_PWD=$(openssl rand -base64 32 | tr -d "=+/\"'\\" | cut -c1-25)
             echo "LOCAL_PWD=$LOCAL_PWD" >> "$ENV_FILE"
             echo -e "${GREEN}✅ LOCAL_PWD agregado al archivo .env${NC}"
             echo -e "${CYAN}Contraseña local: $LOCAL_PWD${NC}"
@@ -280,6 +280,39 @@ check_services_registered() {
     fi
 }
 
+test_oracle_connection() {
+    local oracle_pwd="$1"
+    local service_name="$2"
+    local description="$3"
+    
+    echo -e "${YELLOW}⏳ Probando conexión a $description...${NC}"
+    
+    # Crear script de prueba
+    local test_script="/tmp/test_conn_$$.sql"
+    echo -e "SET FEEDBACK OFF\nSELECT 'CONNECTION_OK' FROM DUAL;\nEXIT;" > "$test_script"
+    
+    # Probar conexión
+    local result=$(docker exec -i oracle-db sqlplus -s system/$oracle_pwd@//localhost:1521/$service_name < "$test_script" 2>&1)
+    rm -f "$test_script"
+    
+    if echo "$result" | grep -q "CONNECTION_OK"; then
+        echo -e "${GREEN}✅ $description accesible${NC}"
+        return 0
+    else
+        echo -e "${RED}❌ $description no accesible${NC}"
+        if echo "$result" | grep -q "ORA-01017"; then
+            echo -e "${RED}   Error ORA-01017: Invalid username/password${NC}"
+        elif echo "$result" | grep -q "ORA-12541"; then
+            echo -e "${RED}   Error ORA-12541: TNS no listener${NC}"
+        elif echo "$result" | grep -q "ORA-12514"; then
+            echo -e "${RED}   Error ORA-12514: TNS service not found${NC}"
+        else
+            echo -e "${YELLOW}   Error: $(echo "$result" | grep -i "ora-" | head -1)${NC}"
+        fi
+        return 1
+    fi
+}
+
 wait_for_oracle_ready() {
     echo -e "${BLUE}🔍 Esperando a que Oracle Database esté completamente listo...${NC}"
     echo -e "${YELLOW}⏳ Esto puede tomar 5-15 minutos en la primera ejecución...${NC}"
@@ -297,7 +330,7 @@ wait_for_oracle_ready() {
             return 1
         fi
         
-        # Verificar que el listener esté activo (pero no requerir servicios aún)
+        # Verificar que el listener esté activo
         if ! check_listener_status >/dev/null 2>&1; then
             echo -e "${YELLOW}⏳ Listener no está listo...${NC}"
             sleep 10
@@ -305,49 +338,101 @@ wait_for_oracle_ready() {
             continue
         fi
         
-        # Verificar que la base de datos esté abierta y accesible
-        if docker exec oracle-db sqlplus -s system/$oracle_pwd@//localhost:1521/ORCLCDB <<< "SELECT 1 FROM DUAL;" >/dev/null 2>&1; then
-            echo -e "${GREEN}✅ Oracle Database está completamente listo${NC}"
-            
-            # Verificar que los servicios estén registrados
-            if check_services_registered >/dev/null 2>&1; then
-                echo -e "${GREEN}✅ Servicios registrados correctamente${NC}"
-                
-                # Verificar que el PDB esté abierto y accesible
-                echo -e "${YELLOW}⏳ Verificando que el PDB esté accesible...${NC}"
-                if docker exec oracle-db sqlplus -s system/$oracle_pwd@//localhost:1521/ORCLPDB1 <<< "SELECT 1 FROM DUAL;" >/dev/null 2>&1; then
-                    echo -e "${GREEN}✅ PDB ORCLPDB1 está accesible${NC}"
-                    echo -e "${GREEN}✅ Oracle Database está listo para crear usuarios${NC}"
-                    return 0
-                else
-                    echo -e "${YELLOW}⏳ PDB aún no está accesible, esperando...${NC}"
-                    sleep 10
-                    ((attempt++))
-                    continue
-                fi
+        # Verificar que los servicios estén registrados
+        if ! check_services_registered >/dev/null 2>&1; then
+            echo -e "${YELLOW}⏳ Servicios aún no registrados...${NC}"
+            sleep 10
+            ((attempt++))
+            continue
+        fi
+        
+        # Probar conexión al CDB
+        if test_oracle_connection "$oracle_pwd" "ORCLCDB" "CDB (ORCLCDB)"; then
+            # Probar conexión al PDB
+            if test_oracle_connection "$oracle_pwd" "ORCLPDB1" "PDB (ORCLPDB1)"; then
+                echo -e "${GREEN}✅ Oracle Database está completamente listo${NC}"
+                return 0
             else
-                echo -e "${YELLOW}⚠️  Base de datos accesible pero servicios aún no registrados${NC}"
-                echo -e "${YELLOW}   Esperando a que los servicios se registren...${NC}"
+                echo -e "${YELLOW}⏳ PDB aún no está accesible, esperando...${NC}"
                 sleep 10
                 ((attempt++))
                 continue
             fi
         else
-            echo -e "${YELLOW}⏳ Base de datos aún no está accesible...${NC}"
+            echo -e "${YELLOW}⏳ CDB aún no está accesible, esperando...${NC}"
             sleep 10
             ((attempt++))
         fi
         
         if [[ $attempt -gt $max_attempts ]]; then
             echo -e "${RED}❌ Timeout esperando que Oracle Database esté listo${NC}"
-            echo -e "${YELLOW}💡 Sugerencias:${NC}"
+            echo -e "${YELLOW}💡 Diagnóstico de problemas:${NC}"
             echo "  - Verifica los logs: docker logs oracle-db"
             echo "  - Verifica recursos del sistema (RAM, CPU)"
             echo "  - Intenta reiniciar: docker-compose restart"
             echo "  - Verifica el estado del listener: docker exec oracle-db lsnrctl status"
+            echo "  - Ejecuta diagnóstico: ./diagnose-oracle.sh"
             return 1
         fi
     done
+}
+
+diagnose_ora01017() {
+    local oracle_pwd="$1"
+    
+    echo -e "${BLUE}🔍 Diagnosticando error ORA-01017...${NC}"
+    
+    # Verificar si la contraseña contiene caracteres especiales problemáticos
+    if [[ "$oracle_pwd" =~ [\"\'\\] ]]; then
+        echo -e "${YELLOW}⚠️  La contraseña contiene caracteres especiales que pueden causar problemas${NC}"
+        echo -e "${YELLOW}   Contraseña actual: $oracle_pwd${NC}"
+        return 1
+    fi
+    
+    # Verificar longitud de contraseña
+    if [[ ${#oracle_pwd} -lt 8 ]]; then
+        echo -e "${YELLOW}⚠️  La contraseña es muy corta (menos de 8 caracteres)${NC}"
+        return 1
+    fi
+    
+    # Probar diferentes formatos de conexión
+    echo -e "${YELLOW}⏳ Probando diferentes formatos de conexión...${NC}"
+    
+    # Formato 1: Conexión directa
+    local test1=$(docker exec oracle-db sqlplus -s system/$oracle_pwd@//localhost:1521/ORCLCDB <<< "SELECT 1 FROM DUAL;" 2>&1)
+    if echo "$test1" | grep -q "ORA-01017"; then
+        echo -e "${RED}❌ Formato 1 falló: ORA-01017${NC}"
+    else
+        echo -e "${GREEN}✅ Formato 1 exitoso${NC}"
+        return 0
+    fi
+    
+    # Formato 2: Con comillas
+    local test2=$(docker exec oracle-db sqlplus -s "system/$oracle_pwd@//localhost:1521/ORCLCDB" <<< "SELECT 1 FROM DUAL;" 2>&1)
+    if echo "$test2" | grep -q "ORA-01017"; then
+        echo -e "${RED}❌ Formato 2 falló: ORA-01017${NC}"
+    else
+        echo -e "${GREEN}✅ Formato 2 exitoso${NC}"
+        return 0
+    fi
+    
+    # Formato 3: Con archivo temporal
+    local test_script="/tmp/test_auth_$$.sql"
+    echo -e "SET FEEDBACK OFF\nSELECT 1 FROM DUAL;\nEXIT;" > "$test_script"
+    local test3=$(docker exec -i oracle-db sqlplus -s system/$oracle_pwd@//localhost:1521/ORCLCDB < "$test_script" 2>&1)
+    rm -f "$test_script"
+    
+    if echo "$test3" | grep -q "ORA-01017"; then
+        echo -e "${RED}❌ Formato 3 falló: ORA-01017${NC}"
+        echo -e "${YELLOW}💡 Posibles soluciones:${NC}"
+        echo "  1. Regenerar contraseña: rm .env && ./setup-oracle.sh"
+        echo "  2. Verificar que el contenedor esté completamente inicializado"
+        echo "  3. Reiniciar el contenedor: docker-compose restart"
+        return 1
+    else
+        echo -e "${GREEN}✅ Formato 3 exitoso${NC}"
+        return 0
+    fi
 }
 
 create_local_user() {
@@ -369,6 +454,12 @@ create_local_user() {
     # Usar la nueva función de espera robusta
     if ! wait_for_oracle_ready; then
         echo -e "${RED}❌ No se pudo verificar que Oracle esté listo${NC}"
+        
+        # Diagnosticar problemas de autenticación
+        if ! diagnose_ora01017 "$oracle_pwd"; then
+            echo -e "${RED}❌ Problemas de autenticación detectados${NC}"
+            return 1
+        fi
         return 1
     fi
     

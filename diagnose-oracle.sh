@@ -56,29 +56,55 @@ echo ""
 
 # Verificar conectividad CDB
 echo -e "${BLUE}🔗 Verificando conectividad CDB:${NC}"
-if docker exec oracle-db sqlplus -s system/$ORACLE_PWD@//localhost:1521/ORCLCDB <<< "SELECT 1 FROM DUAL;" >/dev/null 2>&1; then
+cdb_test=$(echo "SELECT 1 FROM DUAL;" | docker exec -i oracle-db sqlplus -s system/$ORACLE_PWD@//localhost:1521/ORCLCDB 2>&1)
+if echo "$cdb_test" | grep -q "ORA-01017"; then
+    echo -e "${RED}❌ CDB (ORCLCDB) - Error ORA-01017: Invalid username/password${NC}"
+    echo -e "${YELLOW}💡 Soluciones:${NC}"
+    echo "  1. Regenerar contraseña: rm .env && ./setup-oracle.sh"
+    echo "  2. Verificar que el contenedor esté completamente inicializado"
+    echo "  3. Reiniciar: docker-compose restart"
+elif echo "$cdb_test" | grep -q "ORA-12541"; then
+    echo -e "${RED}❌ CDB (ORCLCDB) - Error ORA-12541: TNS no listener${NC}"
+    echo -e "${YELLOW}💡 El listener no está activo${NC}"
+elif echo "$cdb_test" | grep -q "ORA-12514"; then
+    echo -e "${RED}❌ CDB (ORCLCDB) - Error ORA-12514: TNS service not found${NC}"
+    echo -e "${YELLOW}💡 El servicio no está registrado${NC}"
+elif echo "$cdb_test" | grep -q "1"; then
     echo -e "${GREEN}✅ CDB (ORCLCDB) es accesible${NC}"
 else
     echo -e "${RED}❌ CDB (ORCLCDB) no es accesible${NC}"
-    echo -e "${YELLOW}💡 Intenta: docker exec oracle-db sqlplus system/$ORACLE_PWD@//localhost:1521/ORCLCDB${NC}"
+    echo -e "${YELLOW}Error: $(echo "$cdb_test" | grep -i "ora-" | head -1)${NC}"
 fi
 
 echo ""
 
 # Verificar conectividad PDB
 echo -e "${BLUE}🔗 Verificando conectividad PDB:${NC}"
-if docker exec oracle-db sqlplus -s system/$ORACLE_PWD@//localhost:1521/ORCLPDB1 <<< "SELECT 1 FROM DUAL;" >/dev/null 2>&1; then
+pdb_test=$(echo "SELECT 1 FROM DUAL;" | docker exec -i oracle-db sqlplus -s system/$ORACLE_PWD@//localhost:1521/ORCLPDB1 2>&1)
+if echo "$pdb_test" | grep -q "ORA-01017"; then
+    echo -e "${RED}❌ PDB (ORCLPDB1) - Error ORA-01017: Invalid username/password${NC}"
+    echo -e "${YELLOW}💡 Soluciones:${NC}"
+    echo "  1. Regenerar contraseña: rm .env && ./setup-oracle.sh"
+    echo "  2. Verificar que el contenedor esté completamente inicializado"
+    echo "  3. Reiniciar: docker-compose restart"
+elif echo "$pdb_test" | grep -q "ORA-12541"; then
+    echo -e "${RED}❌ PDB (ORCLPDB1) - Error ORA-12541: TNS no listener${NC}"
+    echo -e "${YELLOW}💡 El listener no está activo${NC}"
+elif echo "$pdb_test" | grep -q "ORA-12514"; then
+    echo -e "${RED}❌ PDB (ORCLPDB1) - Error ORA-12514: TNS service not found${NC}"
+    echo -e "${YELLOW}💡 El servicio no está registrado${NC}"
+elif echo "$pdb_test" | grep -q "1"; then
     echo -e "${GREEN}✅ PDB (ORCLPDB1) es accesible${NC}"
 else
     echo -e "${RED}❌ PDB (ORCLPDB1) no es accesible${NC}"
-    echo -e "${YELLOW}💡 Intenta: docker exec oracle-db sqlplus system/$ORACLE_PWD@//localhost:1521/ORCLPDB1${NC}"
+    echo -e "${YELLOW}Error: $(echo "$pdb_test" | grep -i "ora-" | head -1)${NC}"
 fi
 
 echo ""
 
 # Verificar estado del PDB
 echo -e "${BLUE}📊 Verificando estado del PDB:${NC}"
-local pdb_status=$(docker exec oracle-db sqlplus -s system/$ORACLE_PWD@//localhost:1521/ORCLCDB <<< "SELECT name, open_mode FROM v\$pdbs WHERE name = 'ORCLPDB1';" 2>/dev/null | grep -v "^$" | grep -v "SQL>" | grep -v "Connected" | head -1)
+pdb_status=$(echo "SELECT name, open_mode FROM v\$pdbs WHERE name = 'ORCLPDB1';" | docker exec -i oracle-db sqlplus -s system/$ORACLE_PWD@//localhost:1521/ORCLCDB 2>/dev/null | grep -v "^$" | grep -v "SQL>" | grep -v "Connected" | head -1)
 if [[ -n "$pdb_status" ]]; then
     echo -e "${GREEN}✅ Estado del PDB: $pdb_status${NC}"
 else
@@ -90,13 +116,15 @@ echo ""
 # Verificar si el usuario local existe
 echo -e "${BLUE}👤 Verificando usuario local:${NC}"
 if [[ -n "$LOCAL_USER" ]]; then
-    local user_count=$(docker exec oracle-db sqlplus -s system/$ORACLE_PWD@//localhost:1521/ORCLPDB1 <<< "SELECT COUNT(*) FROM dba_users WHERE username = UPPER('$LOCAL_USER');" 2>/dev/null | grep -v "^$" | grep -v "SQL>" | grep -v "Connected" | head -1 | tr -d ' ')
+    # Verificar usuario de forma simple
+    user_count=$(echo "SELECT COUNT(*) FROM dba_users WHERE username = UPPER('$LOCAL_USER');" | docker exec -i oracle-db sqlplus -s system/$ORACLE_PWD@//localhost:1521/ORCLPDB1 2>/dev/null | awk '/^[[:space:]]*[0-9]+[[:space:]]*$/ {print $1}')
     
     if [[ "$user_count" == "1" ]]; then
         echo -e "${GREEN}✅ Usuario $LOCAL_USER existe${NC}"
         
         # Verificar estado del usuario
-        local user_status=$(docker exec oracle-db sqlplus -s system/$ORACLE_PWD@//localhost:1521/ORCLPDB1 <<< "SELECT username, account_status FROM dba_users WHERE username = UPPER('$LOCAL_USER');" 2>/dev/null | grep -v "^$" | grep -v "SQL>" | grep -v "Connected" | head -1)
+        # Verificar estado del usuario de forma simple
+        user_status=$(echo "SELECT username, account_status FROM dba_users WHERE username = UPPER('$LOCAL_USER');" | docker exec -i oracle-db sqlplus -s system/$ORACLE_PWD@//localhost:1521/ORCLPDB1 2>/dev/null | grep -v "^$" | grep -v "SQL>" | grep -v "Connected" | grep -v "Disconnected" | grep -v "USERNAME" | grep -v "\-\-\-" | tail -1)
         echo -e "${CYAN}Estado: $user_status${NC}"
     elif [[ "$user_count" == "0" ]]; then
         echo -e "${YELLOW}⚠️  Usuario $LOCAL_USER no existe${NC}"
