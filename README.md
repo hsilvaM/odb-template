@@ -200,6 +200,7 @@ LOCAL_PWD=password_generada_automáticamente
 odb-template/
 ├── setup-oracle.sh          # Script principal de configuración
 ├── login-oracle-registry.sh # Script de autenticación
+├── diagnose-oracle.sh       # Script de diagnóstico
 ├── docker-compose.yml       # Configuración de Docker Compose
 ├── .env                     # Variables de entorno (generado)
 ├── .gitignore              # Archivos ignorados por Git
@@ -257,6 +258,23 @@ docker exec oracle-db sqlplus -s system/$ORACLE_PWD@//localhost:1521/ORCLCDB <<<
 # Verificar estado del PDB
 docker exec oracle-db sqlplus -s system/$ORACLE_PWD@//localhost:1521/ORCLCDB <<< "SELECT name, open_mode FROM v\$pdbs WHERE name = 'ORCLPDB1';"
 ```
+
+### Script de Diagnóstico
+
+Para diagnosticar problemas de conectividad, usa el script incluido:
+
+```bash
+chmod +x diagnose-oracle.sh
+./diagnose-oracle.sh
+```
+
+Este script verifica:
+- ✅ Estado del contenedor
+- ✅ Estado del listener
+- ✅ Conectividad CDB y PDB
+- ✅ Estado del PDB
+- ✅ Existencia del usuario local
+- ✅ Logs recientes
 
 **Mejoras implementadas:**
 - ✅ **Verificación del Listener**: El script ahora verifica que el listener esté activo y con servicios registrados

@@ -312,8 +312,19 @@ wait_for_oracle_ready() {
             # Verificar que los servicios estén registrados
             if check_services_registered >/dev/null 2>&1; then
                 echo -e "${GREEN}✅ Servicios registrados correctamente${NC}"
-                echo -e "${GREEN}✅ Oracle Database está listo para crear usuarios${NC}"
-                return 0
+                
+                # Verificar que el PDB esté abierto y accesible
+                echo -e "${YELLOW}⏳ Verificando que el PDB esté accesible...${NC}"
+                if docker exec oracle-db sqlplus -s system/$oracle_pwd@//localhost:1521/ORCLPDB1 <<< "SELECT 1 FROM DUAL;" >/dev/null 2>&1; then
+                    echo -e "${GREEN}✅ PDB ORCLPDB1 está accesible${NC}"
+                    echo -e "${GREEN}✅ Oracle Database está listo para crear usuarios${NC}"
+                    return 0
+                else
+                    echo -e "${YELLOW}⏳ PDB aún no está accesible, esperando...${NC}"
+                    sleep 10
+                    ((attempt++))
+                    continue
+                fi
             else
                 echo -e "${YELLOW}⚠️  Base de datos accesible pero servicios aún no registrados${NC}"
                 echo -e "${YELLOW}   Esperando a que los servicios se registren...${NC}"
@@ -361,53 +372,23 @@ create_local_user() {
         return 1
     fi
     
-    # Verificar si el usuario ya existe antes de intentar crearlo
-    echo -e "${YELLOW}⏳ Verificando si el usuario ya existe...${NC}"
-    local user_exists_script="/tmp/check_user_$$.sql"
+    # Crear usuario automáticamente (verificar y crear si no existe)
+    echo -e "${YELLOW}⏳ Configurando usuario $local_user...${NC}"
     
-    cat > "$user_exists_script" << EOF
-SET PAGESIZE 0;
-SET FEEDBACK OFF;
-ALTER SESSION SET CONTAINER = ORCLPDB1;
-SELECT COUNT(*) FROM dba_users WHERE username = UPPER('$local_user');
-EXIT;
-EOF
-    
-    local user_count=$(docker exec -i oracle-db sqlplus -s system/$oracle_pwd@//localhost:1521/ORCLCDB < "$user_exists_script" 2>/dev/null | grep -v "^$" | head -1 | tr -d ' ')
-    
-    if [[ "$user_count" == "1" ]]; then
-        echo -e "${GREEN}✅ Usuario $local_user ya existe${NC}"
-        rm -f "$user_exists_script"
-        return 0
-    elif [[ "$user_count" == "0" ]]; then
-        echo -e "${YELLOW}ℹ️  Usuario $local_user no existe, procediendo a crearlo...${NC}"
-    else
-        echo -e "${YELLOW}⚠️  No se pudo verificar el estado del usuario, procediendo a crearlo...${NC}"
-    fi
-    
-    rm -f "$user_exists_script"
-    
-    # Solo crear el usuario si no existe
-    if [[ "$user_count" != "1" ]]; then
-        echo -e "${YELLOW}⏳ Creando usuario $local_user...${NC}"
-        
-        local sql_script="/tmp/create_user_$$.sql"
-    
-    cat > "$sql_script" << EOF
-SET SERVEROUTPUT ON;
-SET PAGESIZE 0;
-SET FEEDBACK OFF;
+    # Script completo para crear usuario (maneja si ya existe)
+    local create_script="/tmp/create_user_$$.sql"
+    cat > "$create_script" << EOF
+SET FEEDBACK OFF
+SET SERVEROUTPUT ON
 
--- Conectar al PDB (Pluggable Database) en lugar del CDB
-ALTER SESSION SET CONTAINER = ORCLPDB1;
-
--- Verificar si el usuario ya existe y crearlo si no existe
+-- Verificar si el usuario ya existe
 DECLARE
-    user_count NUMBER;
+    user_exists NUMBER;
 BEGIN
-    SELECT COUNT(*) INTO user_count FROM dba_users WHERE username = UPPER('$local_user');
+    SELECT COUNT(*) INTO user_exists FROM dba_users WHERE username = UPPER('$local_user');
     
-    IF user_count = 0 THEN
+    IF user_exists = 0 THEN
+        -- Crear usuario
         EXECUTE IMMEDIATE 'CREATE USER $local_user IDENTIFIED BY "$local_pwd"';
         EXECUTE IMMEDIATE 'GRANT CONNECT, RESOURCE TO $local_user';
         EXECUTE IMMEDIATE 'GRANT CREATE SESSION TO $local_user';
@@ -417,9 +398,9 @@ BEGIN
         EXECUTE IMMEDIATE 'GRANT CREATE SEQUENCE TO $local_user';
         EXECUTE IMMEDIATE 'GRANT CREATE TRIGGER TO $local_user';
         EXECUTE IMMEDIATE 'GRANT UNLIMITED TABLESPACE TO $local_user';
-        DBMS_OUTPUT.PUT_LINE('SUCCESS: Usuario $local_user creado exitosamente en PDB');
+        DBMS_OUTPUT.PUT_LINE('SUCCESS: Usuario $local_user creado exitosamente');
     ELSE
-        DBMS_OUTPUT.PUT_LINE('INFO: Usuario $local_user ya existe en PDB');
+        DBMS_OUTPUT.PUT_LINE('INFO: Usuario $local_user ya existe');
     END IF;
 EXCEPTION
     WHEN OTHERS THEN
@@ -427,62 +408,29 @@ EXCEPTION
 END;
 /
 
--- Verificar que el usuario fue creado correctamente en el PDB
-SELECT 'USER_INFO: ' || username || ' - ' || account_status || ' - ' || TO_CHAR(created, 'DD-MON-YYYY HH24:MI:SS') 
-FROM dba_users WHERE username = UPPER('$local_user');
+-- Verificar el resultado
+SELECT 'USER_STATUS: ' || username || ' - ' || account_status FROM dba_users WHERE username = UPPER('$local_user');
 
 EXIT;
 EOF
 
-    echo -e "${YELLOW}Ejecutando script SQL para crear usuario...${NC}"
+    echo -e "${YELLOW}Ejecutando script de creación de usuario...${NC}"
+    local create_result=$(docker exec -i oracle-db sqlplus -s system/$oracle_pwd@//localhost:1521/ORCLPDB1 < "$create_script" 2>&1)
+    rm -f "$create_script"
     
-    if docker exec -i oracle-db sqlplus -s system/$oracle_pwd@//localhost:1521/ORCLCDB < "$sql_script" > /tmp/oracle_user_creation_$$.log 2>&1; then
-        if grep -q "SUCCESS: Usuario $local_user creado exitosamente" /tmp/oracle_user_creation_$$.log; then
-            echo -e "${GREEN}✅ Usuario $local_user creado exitosamente${NC}"
-        elif grep -q "INFO: Usuario $local_user ya existe" /tmp/oracle_user_creation_$$.log; then
-            echo -e "${GREEN}✅ Usuario $local_user ya existe${NC}"
-        elif grep -q "USER_INFO:" /tmp/oracle_user_creation_$$.log; then
-            echo -e "${GREEN}✅ Usuario $local_user existe y está activo${NC}"
-            grep "USER_INFO:" /tmp/oracle_user_creation_$$.log | sed 's/USER_INFO: //'
-        else
-            echo -e "${YELLOW}⚠️  No se pudo determinar el estado del usuario${NC}"
-            echo -e "${YELLOW}Verificando manualmente...${NC}"
-            
-            local verify_script="/tmp/verify_user_$$.sql"
-            cat > "$verify_script" << EOF
-SET PAGESIZE 0;
-SET FEEDBACK OFF;
-ALTER SESSION SET CONTAINER = ORCLPDB1;
-SELECT username || ' - ' || account_status || ' - ' || TO_CHAR(created, 'DD-MON-YYYY HH24:MI:SS') 
-FROM dba_users WHERE username = UPPER('$local_user');
-EXIT;
-EOF
-            
-            local verify_result=$(docker exec -i oracle-db sqlplus -s system/$oracle_pwd@//localhost:1521/ORCLCDB < "$verify_script" 2>/dev/null | grep -v "^$" | head -1)
-            
-            if [[ -n "$verify_result" && "$verify_result" != *"no rows selected"* ]]; then
-                echo -e "${GREEN}✅ Usuario $local_user existe y está activo${NC}"
-                echo -e "${CYAN}Información: $verify_result${NC}"
-            else
-                echo -e "${RED}❌ Error al crear usuario $local_user${NC}"
-                echo -e "${YELLOW}Logs del error:${NC}"
-                cat /tmp/oracle_user_creation_$$.log
-                rm -f "$sql_script" "$verify_script" /tmp/oracle_user_creation_$$.log
-                return 1
-            fi
-            rm -f "$verify_script"
-        fi
-    else
-        echo -e "${RED}❌ Error al ejecutar script SQL${NC}"
-        echo -e "${YELLOW}Logs del error:${NC}"
-        cat /tmp/oracle_user_creation_$$.log
-        rm -f "$sql_script" /tmp/oracle_user_creation_$$.log
-        return 1
-    fi
-    
-        rm -f "$sql_script" /tmp/oracle_user_creation_$$.log
-        
+    # Analizar el resultado
+    if echo "$create_result" | grep -q "SUCCESS: Usuario $local_user creado exitosamente"; then
         echo -e "${GREEN}✅ Usuario $local_user creado exitosamente${NC}"
+    elif echo "$create_result" | grep -q "INFO: Usuario $local_user ya existe"; then
+        echo -e "${GREEN}✅ Usuario $local_user ya existe${NC}"
+    elif echo "$create_result" | grep -q "USER_STATUS:"; then
+        echo -e "${GREEN}✅ Usuario $local_user configurado correctamente${NC}"
+        echo -e "${CYAN}$(echo "$create_result" | grep "USER_STATUS:")${NC}"
+    else
+        echo -e "${RED}❌ Error al configurar usuario $local_user${NC}"
+        echo -e "${YELLOW}Resultado del comando:${NC}"
+        echo "$create_result"
+        return 1
     fi
     
     echo -e "${GREEN}✅ Usuario local configurado correctamente${NC}"
