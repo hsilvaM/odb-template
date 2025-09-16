@@ -253,6 +253,92 @@ verify_oracle_container() {
     done
 }
 
+check_listener_status() {
+    echo -e "${BLUE}🔍 Verificando estado del listener...${NC}"
+    
+    # Verificar que el listener esté corriendo
+    if docker exec oracle-db lsnrctl status >/dev/null 2>&1; then
+        echo -e "${GREEN}✅ Listener está activo${NC}"
+        return 0
+    else
+        echo -e "${YELLOW}⚠️  Listener no está activo${NC}"
+        return 1
+    fi
+}
+
+check_services_registered() {
+    echo -e "${BLUE}🔍 Verificando servicios registrados...${NC}"
+    
+    # Verificar que los servicios estén registrados
+    local services=$(docker exec oracle-db lsnrctl services 2>/dev/null | grep -c "Service" || echo "0")
+    if [[ $services -gt 0 ]]; then
+        echo -e "${GREEN}✅ Servicios registrados en el listener: $services${NC}"
+        return 0
+    else
+        echo -e "${YELLOW}⚠️  Listener activo pero sin servicios registrados aún${NC}"
+        return 1
+    fi
+}
+
+wait_for_oracle_ready() {
+    echo -e "${BLUE}🔍 Esperando a que Oracle Database esté completamente listo...${NC}"
+    echo -e "${YELLOW}⏳ Esto puede tomar 5-15 minutos en la primera ejecución...${NC}"
+    
+    local oracle_pwd=$(grep ORACLE_PWD .env | cut -d'=' -f2)
+    local max_attempts=60  # Aumentado a 60 intentos (10 minutos)
+    local attempt=1
+    
+    while [[ $attempt -le $max_attempts ]]; do
+        echo -n "Intento $attempt/$max_attempts: "
+        
+        # Verificar que el contenedor esté corriendo
+        if ! docker ps | grep -q "oracle-db"; then
+            echo -e "${RED}❌ Contenedor no está corriendo${NC}"
+            return 1
+        fi
+        
+        # Verificar que el listener esté activo (pero no requerir servicios aún)
+        if ! check_listener_status >/dev/null 2>&1; then
+            echo -e "${YELLOW}⏳ Listener no está listo...${NC}"
+            sleep 10
+            ((attempt++))
+            continue
+        fi
+        
+        # Verificar que la base de datos esté abierta y accesible
+        if docker exec oracle-db sqlplus -s system/$oracle_pwd@//localhost:1521/ORCLCDB <<< "SELECT 1 FROM DUAL;" >/dev/null 2>&1; then
+            echo -e "${GREEN}✅ Oracle Database está completamente listo${NC}"
+            
+            # Verificar que los servicios estén registrados
+            if check_services_registered >/dev/null 2>&1; then
+                echo -e "${GREEN}✅ Servicios registrados correctamente${NC}"
+                echo -e "${GREEN}✅ Oracle Database está listo para crear usuarios${NC}"
+                return 0
+            else
+                echo -e "${YELLOW}⚠️  Base de datos accesible pero servicios aún no registrados${NC}"
+                echo -e "${YELLOW}   Esperando a que los servicios se registren...${NC}"
+                sleep 10
+                ((attempt++))
+                continue
+            fi
+        else
+            echo -e "${YELLOW}⏳ Base de datos aún no está accesible...${NC}"
+            sleep 10
+            ((attempt++))
+        fi
+        
+        if [[ $attempt -gt $max_attempts ]]; then
+            echo -e "${RED}❌ Timeout esperando que Oracle Database esté listo${NC}"
+            echo -e "${YELLOW}💡 Sugerencias:${NC}"
+            echo "  - Verifica los logs: docker logs oracle-db"
+            echo "  - Verifica recursos del sistema (RAM, CPU)"
+            echo "  - Intenta reiniciar: docker-compose restart"
+            echo "  - Verifica el estado del listener: docker exec oracle-db lsnrctl status"
+            return 1
+        fi
+    done
+}
+
 create_local_user() {
     echo -e "${BLUE}👤 Creando usuario local de Oracle...${NC}"
     
@@ -268,32 +354,44 @@ create_local_user() {
     local_user=$(echo "$local_user" | tr '[:upper:]' '[:lower:]')
     
     echo "Usuario: $local_user"
-    echo -e "${YELLOW}Esperando a que la base de datos esté completamente lista...${NC}"
     
-    local max_attempts=30
-    local attempt=1
+    # Usar la nueva función de espera robusta
+    if ! wait_for_oracle_ready; then
+        echo -e "${RED}❌ No se pudo verificar que Oracle esté listo${NC}"
+        return 1
+    fi
     
-    while [[ $attempt -le $max_attempts ]]; do
-        echo -n "Intento $attempt/$max_attempts: "
+    # Verificar si el usuario ya existe antes de intentar crearlo
+    echo -e "${YELLOW}⏳ Verificando si el usuario ya existe...${NC}"
+    local user_exists_script="/tmp/check_user_$$.sql"
+    
+    cat > "$user_exists_script" << EOF
+SET PAGESIZE 0;
+SET FEEDBACK OFF;
+ALTER SESSION SET CONTAINER = ORCLPDB1;
+SELECT COUNT(*) FROM dba_users WHERE username = UPPER('$local_user');
+EXIT;
+EOF
+    
+    local user_count=$(docker exec -i oracle-db sqlplus -s system/$oracle_pwd@//localhost:1521/ORCLCDB < "$user_exists_script" 2>/dev/null | grep -v "^$" | head -1 | tr -d ' ')
+    
+    if [[ "$user_count" == "1" ]]; then
+        echo -e "${GREEN}✅ Usuario $local_user ya existe${NC}"
+        rm -f "$user_exists_script"
+        return 0
+    elif [[ "$user_count" == "0" ]]; then
+        echo -e "${YELLOW}ℹ️  Usuario $local_user no existe, procediendo a crearlo...${NC}"
+    else
+        echo -e "${YELLOW}⚠️  No se pudo verificar el estado del usuario, procediendo a crearlo...${NC}"
+    fi
+    
+    rm -f "$user_exists_script"
+    
+    # Solo crear el usuario si no existe
+    if [[ "$user_count" != "1" ]]; then
+        echo -e "${YELLOW}⏳ Creando usuario $local_user...${NC}"
         
-        if docker exec oracle-db sqlplus -s system/$oracle_pwd@//localhost:1521/ORCLCDB <<< "SELECT 1 FROM DUAL;" >/dev/null 2>&1; then
-            echo -e "${GREEN}✅ Base de datos lista${NC}"
-            break
-        else
-            echo -e "${YELLOW}⏳ Esperando...${NC}"
-            sleep 10
-            ((attempt++))
-        fi
-        
-        if [[ $attempt -gt $max_attempts ]]; then
-            echo -e "${RED}❌ Timeout esperando que la base de datos esté lista${NC}"
-            return 1
-        fi
-    done
-    
-    echo "Verificando si el usuario ya existe..."
-    
-    local sql_script="/tmp/create_user_$$.sql"
+        local sql_script="/tmp/create_user_$$.sql"
     
     cat > "$sql_script" << EOF
 SET SERVEROUTPUT ON;
@@ -382,7 +480,10 @@ EOF
         return 1
     fi
     
-    rm -f "$sql_script" /tmp/oracle_user_creation_$$.log
+        rm -f "$sql_script" /tmp/oracle_user_creation_$$.log
+        
+        echo -e "${GREEN}✅ Usuario $local_user creado exitosamente${NC}"
+    fi
     
     echo -e "${GREEN}✅ Usuario local configurado correctamente${NC}"
     echo -e "${CYAN}Usuario: $local_user${NC}"
@@ -688,6 +789,10 @@ main() {
     echo ""
     
     verify_oracle_container
+    echo ""
+    
+    # Esperar a que Oracle esté completamente listo antes de crear usuarios
+    wait_for_oracle_ready
     echo ""
     
     create_local_user

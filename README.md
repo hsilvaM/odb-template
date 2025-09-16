@@ -240,6 +240,33 @@ netstat -tulpn | grep 1520
 docker inspect oracle-db
 ```
 
+### Errores de "No Listener" o "Database not ready"
+
+El script ahora incluye verificaciones robustas para evitar estos errores comunes:
+
+```bash
+# Verificar estado del listener
+docker exec oracle-db lsnrctl status
+
+# Verificar servicios registrados
+docker exec oracle-db lsnrctl services
+
+# Verificar estado de la base de datos
+docker exec oracle-db sqlplus -s system/$ORACLE_PWD@//localhost:1521/ORCLCDB <<< "SELECT 1 FROM DUAL;"
+
+# Verificar estado del PDB
+docker exec oracle-db sqlplus -s system/$ORACLE_PWD@//localhost:1521/ORCLCDB <<< "SELECT name, open_mode FROM v\$pdbs WHERE name = 'ORCLPDB1';"
+```
+
+**Mejoras implementadas:**
+- ✅ **Verificación del Listener**: El script ahora verifica que el listener esté activo y con servicios registrados
+- ✅ **Espera Inteligente**: Aumentado el tiempo de espera a 10 minutos con verificaciones cada 10 segundos
+- ✅ **Verificación de Servicios**: Espera a que los servicios estén registrados antes de proceder
+- ✅ **Verificación de Usuario Existente**: Verifica si el usuario ya existe antes de intentar crearlo
+- ✅ **Mensajes Informativos**: Proporciona feedback detallado sobre el estado de cada componente
+- ✅ **Sugerencias de Solución**: Incluye comandos específicos para diagnosticar problemas
+- ✅ **Prevención de Errores**: Evita errores de "logon denied" verificando el estado antes de crear usuarios
+
 ## 📝 Notas Importantes
 
 - ⚠️ **Primera ejecución**: El contenedor puede tardar varios minutos en inicializarse
